@@ -55,42 +55,9 @@
               <executable>${basedir}/scripts/gen-proto.sh</executable>
               <arguments>
                 <argument>${basedir}/kvproto</argument>
+                <argument>${basedir}/target/proto</argument>
                 <argument>${kvproto.branch}</argument>
               </arguments>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <artifactId>maven-resources-plugin</artifactId>
-        <version>3.2.0</version>
-        <executions>
-          <execution>
-            <id>gather-proto</id>
-            <phase>generate-sources</phase>
-            <goals>
-              <goal>copy-resources</goal>
-            </goals>
-            <configuration>
-              <outputDirectory>${basedir}/target/proto</outputDirectory>
-              <resources>
-                <resource>
-                  <directory>${basedir}/kvproto/include</directory>
-                  <includes>
-                    <include>**/gogoproto/**</include>
-                  </includes>
-                </resource>
-                <resource>
-                  <directory>${basedir}/kvproto/include</directory>
-                  <includes>
-                    <include>*.proto</include>
-                  </includes>
-                </resource>
-                <resource>
-                  <directory>${basedir}/kvproto/proto</directory>
-                  <filtering>true</filtering>
-                </resource>
-              </resources>
             </configuration>
           </execution>
         </executions>
@@ -117,6 +84,7 @@
           <includes>
             <param>**/*.proto</param>
           </includes>
+          <attachProtoSources>false</attachProtoSources>
         </configuration>
       </plugin>
       <plugin>
@@ -189,8 +157,35 @@
       </plugin>
     </plugins>
   </build>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>1.7.32</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-log4j12</artifactId>
+      <version>1.7.32</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>jul-to-slf4j</artifactId>
+      <version>1.7.32</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>jcl-over-slf4j</artifactId>
+      <version>1.7.32</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
   <properties>
     <protobuf.version>3.5.1</protobuf.version>
+    <slf4j.version>1.7.32</slf4j.version>
     <scala.version>${scala.version.major}.${scala.version.minor}</scala.version>
     <scala.version.major>2.12</scala.version.major>
     <kvproto.branch>df38c15b57b3049293c71ca828a42d83faffe221</kvproto.branch>

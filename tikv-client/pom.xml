@@ -116,42 +116,9 @@
                             <executable>${basedir}/scripts/gen-proto.sh</executable>
                             <arguments>
                                 <argument>${basedir}/kvproto</argument>
+                                <argument>${basedir}/target/proto</argument>
                                 <argument>${kvproto.branch}</argument>
                             </arguments>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>3.2.0</version>
-                <executions>
-                    <execution>
-                        <id>gather-proto</id>
-                        <phase>generate-sources</phase>
-                        <goals>
-                            <goal>copy-resources</goal>
-                        </goals>
-                        <configuration>
-                            <outputDirectory>${basedir}/target/proto</outputDirectory>
-                            <resources>
-                                <resource>
-                                    <directory>${basedir}/kvproto/include</directory>
-                                    <includes>
-                                        <include>**/gogoproto/**</include>
-                                    </includes>
-                                </resource>
-                                <resource>
-                                    <directory>${basedir}/kvproto/include</directory>
-                                    <includes>
-                                        <include>*.proto</include>
-                                    </includes>
-                                </resource>
-                                <resource>
-                                    <directory>${basedir}/kvproto/proto</directory>
-                                    <filtering>true</filtering>
-                                </resource>
-                            </resources>
                         </configuration>
                     </execution>
                 </executions>
@@ -170,6 +137,7 @@
                     <includes>
                         <param>**/*.proto</param>
                     </includes>
+                    <attachProtoSources>false</attachProtoSources>
                 </configuration>
                 <executions>
                     <execution>

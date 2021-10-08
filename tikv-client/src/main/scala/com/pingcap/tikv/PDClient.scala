@@ -1,7 +1,7 @@
 package com.pingcap.tikv
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder
-import com.pingcap.kvproto.{Metapb, PDGrpc, Pdpb}
+import com.pingcap.kvproto.{PDGrpc, Pdpb}
 import com.pingcap.tikv.PDClient._
 import io.grpc.health.v1.{HealthCheckRequest, HealthCheckResponse, HealthGrpc}
 import io.grpc.{ManagedChannel, StatusRuntimeException}
@@ -19,13 +19,13 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 
-class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) extends AutoCloseable {
+class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) extends AutoCloseable {
   private val log = LoggerFactory.getLogger(getClass.getName.stripSuffix("$"))
 
-  require(pdAddrs.nonEmpty && !pdAddrs.exists(addr => addr.isEmpty),
+  require(pdAddrOrURLs.nonEmpty && !pdAddrOrURLs.exists(_.isEmpty),
     "The length of pdAddrs must be greater than 0 and any pdAddr must not be empty.")
 
-  pdAddrs = pdAddrs.map(addr => PDClient.normalizeAddr(addr))
+  @volatile private var pdAddrs = pdAddrOrURLs.map(PDClient.normalizeAddr)
 
   @volatile private var clusterID = 0L
   @volatile private var leaderAddr = ""
@@ -72,15 +72,15 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
 
 
   private def getOrCreateChannel(addr: String): ManagedChannel = {
-    channelPool.computeIfAbsent(addr, addr => {
-      NettyChannelBuilder.forTarget(addr).usePlaintext().build()
-    })
+    channelPool.computeIfAbsent(addr,
+      NettyChannelBuilder.forTarget(_).usePlaintext().build()
+    )
   }
 
   private def removeUsedChannel(inUseAddrs: Array[String]): Unit = {
-    channelPool.keys().asScala
-      .filter(key => !inUseAddrs.exists(addr => addr.equals(key)))
-      .foreach(addr => channelPool.remove(addr).shutdown())
+    channelPool.keys().asScala.toList
+      .filter(key => !inUseAddrs.exists(_.equals(key)))
+      .foreach(channelPool.remove(_).shutdown())
   }
 
   private def getMembers(addr: String): Pdpb.GetMembersResponse = {
@@ -100,7 +100,7 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
           allIsWell = false
         }
         if (clusterID > 0 && resp.getHeader.getClusterId != clusterID) {
-          log.warn(s"Cluster ID is unexpectedly changed. Please check your cluster." +
+          log.warn(s"Cluster ID is changed unexpectedly. Please check your cluster." +
             s" (old-cluster-id: $clusterID, new-cluster-id: ${resp.getHeader.getClusterId})")
         }
         clusterID = resp.getHeader.getClusterId
@@ -121,18 +121,19 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
             changed = true
           }
           val newFollowerAddrs = resp.getMembersList.stream()
-            .filter(m => m.getMemberId != resp.getLeader.getMemberId)
-            .flatMap(m => m.getClientUrlsList.stream())
+            .filter(_.getMemberId != resp.getLeader.getMemberId)
+            .flatMap(_.getClientUrlsList.stream())
             .collect(Collectors.toList[String])
             .asScala.toArray
-            .map(u => PDClient.normalizeAddr(u))
+            .map(PDClient.normalizeAddr)
           if (!newFollowerAddrs.sameElements(followerAddrs)) {
             followerAddrs = newFollowerAddrs
             changed = true
           }
           if (changed) {
             log.info(s"Updated cluster (cluster-id: $clusterID ,leader: $leaderAddr, followers: ${followerAddrs.mkString("(", ", ", ")")})")
-            removeUsedChannel(Array(leaderAddr) ++ followerAddrs)
+            pdAddrs = Array(leaderAddr) ++ followerAddrs
+            removeUsedChannel(pdAddrs)
           }
           return true
         }
@@ -160,7 +161,7 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
 
   private def getStub: PDGrpc.PDBlockingStub = {
     if (enableForwarding && leaderNetworkFailure) {
-      val stubAndAddr = getFollowerStub
+      val stubAndAddr = selectOneFollower
       if (stubAndAddr != null) {
         log.debug(s"Use follower address ${stubAndAddr._2} to connect PD")
         return stubAndAddr._1.withInterceptors(
@@ -168,14 +169,11 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
           .withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
       }
     }
-    getLeaderStub.withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-  }
-
-  private def getLeaderStub: PDGrpc.PDBlockingStub = {
     PDGrpc.newBlockingStub(getOrCreateChannel(leaderAddr))
+      .withDeadlineAfter(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
   }
 
-  private def getFollowerStub: (PDGrpc.PDBlockingStub, String) = {
+  private def selectOneFollower: (PDGrpc.PDBlockingStub, String) = {
     val addrs = Random.shuffle(followerAddrs.toList)
     for (addr <- addrs) {
       val channel = getOrCreateChannel(addr)
@@ -193,38 +191,6 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
     null
   }
 
-  def getClusterID: Long = {
-    0
-  }
-
-  def getAllMembers: Array[Pdpb.Member] = {
-    null
-  }
-
-  def getLeaderAddr: String = {
-    leaderAddr
-  }
-
-  def getTS: Long = {
-    0
-  }
-
-  def getRegion(regionID: Long): Pdpb.Region = {
-    null
-  }
-
-  def getRegionByKey(key: Array[Byte]): Pdpb.Region = {
-    null
-  }
-
-  def scanRegions(key: Array[Byte], endKey: Array[Byte]): Array[Pdpb.Region] = {
-    null
-  }
-
-  def getStore(storeID: Long): Metapb.Store = {
-    null
-  }
-
   override def close(): Unit = {
     threadPool.shutdown()
     for (channel <- channelPool.values().asScala) {
@@ -236,8 +202,8 @@ class PDClient(var pdAddrs: Array[String], enableForwarding: Boolean = true) ext
 
 private object PDClient {
   val MAX_INIT_CLUSTER_RETRY = 60
-  val NEXT_INIT_CLUSTER_DELAY_MS = 1
-  val DEFAULT_TIMEOUT_MS = 10000
+  val NEXT_INIT_CLUSTER_DELAY_MS = 1000
+  val DEFAULT_TIMEOUT_MS = 10000 // 10s
   val MS_PER_TICK = 100
   val CHECK_LEADER_TICKS: Int = 1000 / MS_PER_TICK // 1s
   val UPDATE_CLUSTER_TICKS: Int = 10000 / MS_PER_TICK // 10s
@@ -267,7 +233,6 @@ object PDClientTest {
     LogManager.getRootLogger.setLevel(Level.INFO)
 
     val client = new PDClient(Array("127.0.0.1:2379", "127.0.0.1:2382", "127.0.0.1:2384"))
-    //        client.close()
-    TimeUnit.SECONDS.sleep(3600)
+    client.close()
   }
 }
