@@ -11,7 +11,6 @@ import io.grpc.Status.Code
 import io.grpc.stub.MetadataUtils
 import org.apache.log4j.{Level, LogManager}
 import org.slf4j.LoggerFactory
-
 import java.net.URL
 import java.util.concurrent.{ConcurrentHashMap, Executors, TimeUnit}
 import java.util.stream.Collectors
@@ -77,7 +76,7 @@ class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) ex
     )
   }
 
-  private def removeUsedChannel(inUseAddrs: Array[String]): Unit = {
+  private def removeOrphanChannel(inUseAddrs: Array[String]): Unit = {
     channelPool.keys().asScala.toList
       .filter(key => !inUseAddrs.exists(_.equals(key)))
       .foreach(channelPool.remove(_).shutdown())
@@ -133,7 +132,7 @@ class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) ex
           if (changed) {
             log.info(s"Updated cluster (cluster-id: $clusterID ,leader: $leaderAddr, followers: ${followerAddrs.mkString("(", ", ", ")")})")
             pdAddrs = Array(leaderAddr) ++ followerAddrs
-            removeUsedChannel(pdAddrs)
+            removeOrphanChannel(pdAddrs)
           }
           return true
         }
