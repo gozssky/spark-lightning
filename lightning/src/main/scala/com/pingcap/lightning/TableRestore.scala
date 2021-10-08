@@ -2,19 +2,15 @@ package com.pingcap.lightning
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.TaskContext
 import org.apache.spark.sql.Row
 import org.tikv.common.{TiConfiguration, TiSession}
 import org.tikv.common.codec.{CodecDataOutput, TableCodec}
-import org.tikv.common.importer.{ImporterClient, SwitchTiKVModeClient}
+import org.tikv.common.importer.SwitchTiKVModeClient
 import org.tikv.common.key.{IndexKey, Key, RowKey}
 import org.tikv.common.meta.{TiIndexInfo, TiTableInfo}
 import org.tikv.common.region.TiRegion
 import org.tikv.common.row.ObjectRowImpl
-import org.tikv.common.util.Pair
-import org.tikv.shade.com.google.protobuf.ByteString
 
-import java.util.UUID
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
 
@@ -106,36 +102,15 @@ class TableRestore(tiConf: TiConfiguration) extends Serializable {
   }
 
   private def writeAndIngest(iter: Iterator[(Array[Byte], Array[Byte])], partitioner: RegionPartitioner): Unit = {
-    if (iter.nonEmpty) {
-      val region = partitioner.getPartitionRegion(TaskContext.getPartitionId())
-      if (region != null) {
-        val array = iter.toArray.sortWith((kv1, kv2) => {
-          Key.toRawKey(kv1._1).compareTo(Key.toRawKey(kv2._1)) < 0
-        })
-        val minKey = Key.toRawKey(array(0)._1)
-        val maxKey = Key.toRawKey(array.last._1)
-
-        val uuid = genUUID()
-        val tiSession = TiSession.create(tiConf)
-        val importerClient = new ImporterClient(tiSession, ByteString.copyFrom(uuid), minKey, maxKey, region, null)
-        importerClient.write(array.map(kv => Pair.create(ByteString.copyFrom(kv._1), ByteString.copyFrom(kv._2))).iterator.asJava)
-        tiSession.close()
-      }
-    }
-  }
-
-  private def genUUID(): Array[Byte] = {
-    val uuid = UUID.randomUUID()
-    val out = new Array[Byte](16)
-    val msb = uuid.getMostSignificantBits
-    val lsb = uuid.getLeastSignificantBits
-    for (i <- 0 until 8) {
-      out(i) = ((msb >> ((7 - i) * 8)) & 0xff).toByte
-    }
-    for (i <- 8 until 16) {
-      out(i) = ((lsb >> ((15 - i) * 8)) & 0xff).toByte
-    }
-    out
+    //    if (iter.nonEmpty) {
+    //      val region = partitioner.getPartitionRegion(TaskContext.getPartitionId())
+    //      if (region != null) {
+    //        val tiSession = TiSession.create(tiConf)
+    //        val importClient = new ImportClient(tiSession, region)
+    //        importClient.write(iter)
+    //        tiSession.close()
+    //      }
+    //    }
   }
 
   // TODO: This method may be used later.
