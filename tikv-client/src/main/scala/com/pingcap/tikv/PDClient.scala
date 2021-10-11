@@ -307,6 +307,12 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
 
   override def close(): Unit = {
     threadPool.shutdown()
+    try {
+      threadPool.awaitTermination(DEFAULT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS)
+    } catch {
+      case e: InterruptedException =>
+        throw new RuntimeException("shutdown thread pool timeout")
+    }
     for (channel <- channelPool.values().asScala) {
       channel.shutdown()
     }
