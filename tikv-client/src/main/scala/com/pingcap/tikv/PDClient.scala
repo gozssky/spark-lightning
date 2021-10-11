@@ -1,7 +1,8 @@
 package com.pingcap.tikv
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder
-import com.pingcap.kvproto.{PDGrpc, Pdpb}
+import com.google.protobuf.ByteString
+import com.pingcap.kvproto.{Metapb, PDGrpc, Pdpb}
 import com.pingcap.tikv.PDClient._
 import io.grpc.health.v1.{HealthCheckRequest, HealthCheckResponse, HealthGrpc}
 import io.grpc.{ManagedChannel, StatusRuntimeException}
@@ -9,8 +10,8 @@ import io.grpc.netty.NettyChannelBuilder
 import io.grpc.{Metadata, Status}
 import io.grpc.Status.Code
 import io.grpc.stub.MetadataUtils
-import org.apache.log4j.{Level, LogManager}
 import org.slf4j.LoggerFactory
+
 import java.net.URL
 import java.util.concurrent.{ConcurrentHashMap, Executors, TimeUnit}
 import java.util.stream.Collectors
@@ -18,13 +19,13 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 
-class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) extends AutoCloseable {
+class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) extends AutoCloseable {
   private val log = LoggerFactory.getLogger(getClass.getName.stripSuffix("$"))
 
-  require(pdAddrOrURLs.nonEmpty && !pdAddrOrURLs.exists(_.isEmpty),
-    "The length of pdAddrs must be greater than 0 and any pdAddr must not be empty.")
+  require(initPDAddrs.nonEmpty && !initPDAddrs.exists(_.isEmpty),
+    "The length of initPDAddrs must be greater than 0 and each PDAddr must be non-empty.")
 
-  @volatile private var pdAddrs = pdAddrOrURLs.map(PDClient.normalizeAddr)
+  @volatile private var pdAddrs = initPDAddrs.map(PDClient.normalizeAddr)
 
   @volatile private var clusterID = 0L
   @volatile private var leaderAddr = ""
@@ -34,6 +35,7 @@ class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) ex
   @volatile private var checkLeaderNow = false
   @volatile private var leaderNetworkFailure = false
   @volatile private var forwardingMetadata = new Metadata()
+  @volatile private var requestHeader: Pdpb.RequestHeader = _
   private val channelPool = new ConcurrentHashMap[String, ManagedChannel]()
 
   private def initCluster(): Unit = {
@@ -103,6 +105,7 @@ class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) ex
             s" (old-cluster-id: $clusterID, new-cluster-id: ${resp.getHeader.getClusterId})")
         }
         clusterID = resp.getHeader.getClusterId
+        requestHeader = Pdpb.RequestHeader.newBuilder().setClusterId(clusterID).build()
         if (resp.getLeader == null || resp.getLeader.getClientUrlsList.isEmpty) {
           log.warn(s"Failed to retrieve leader's url in the response from $addr")
           allIsWell = false
@@ -190,6 +193,118 @@ class PDClient(pdAddrOrURLs: Array[String], enableForwarding: Boolean = true) ex
     null
   }
 
+  def getRegion(regionID: Long): Metapb.Region = {
+    try {
+      val resp = getStub.getRegionByID(
+        Pdpb.GetRegionByIDRequest.newBuilder()
+          .setHeader(requestHeader)
+          .setRegionId(regionID)
+          .build()
+      )
+      resp.getRegion
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def getRegion(key: Array[Byte]): Metapb.Region = {
+    try {
+      val resp = getStub.getRegion(
+        Pdpb.GetRegionRequest.newBuilder()
+          .setHeader(requestHeader)
+          .setRegionKey(ByteString.copyFrom(key))
+          .build()
+      )
+      resp.getRegion
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def getStore(storeID: Long): Metapb.Store = {
+    try {
+      val resp = getStub.getStore(
+        Pdpb.GetStoreRequest.newBuilder()
+          .setHeader(requestHeader)
+          .setStoreId(storeID)
+          .build()
+      )
+      resp.getStore
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def scanRegions(startKey: Array[Byte], endKey: Array[Byte], limit: Int): Array[Metapb.Region] = {
+    try {
+      val resp = getStub.scanRegions(
+        Pdpb.ScanRegionsRequest.newBuilder()
+          .setHeader(requestHeader)
+          .setStartKey(ByteString.copyFrom(startKey))
+          .setEndKey(ByteString.copyFrom(endKey))
+          .setLimit(limit)
+          .build()
+      )
+      resp.getRegionMetasList.asScala.toArray
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def splitRegions(splitKeys: Array[Array[Byte]]): Unit = {
+    try {
+      getStub.splitRegions(
+        Pdpb.SplitRegionsRequest.newBuilder()
+          .setHeader(requestHeader)
+          .addAllSplitKeys(splitKeys.map(ByteString.copyFrom).toIterable.asJava)
+          .build()
+      )
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def scatterRegions(regionIDs: Array[Long]): Unit = {
+    try {
+      getStub.scatterRegion(
+        Pdpb.ScatterRegionRequest.newBuilder()
+          .setHeader(requestHeader)
+          .addAllRegionsId(regionIDs.map(java.lang.Long.valueOf).toIterable.asJava)
+          .build()
+      )
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
+  def getRegionStatus(regionID: Long): Pdpb.OperatorStatus = {
+    try {
+      val resp = getStub.getOperator(
+        Pdpb.GetOperatorRequest.newBuilder()
+          .setHeader(requestHeader)
+          .setRegionId(regionID)
+          .build()
+      )
+      resp.getStatus
+    } catch {
+      case e: StatusRuntimeException =>
+        checkLeaderNow = true
+        throw e
+    }
+  }
+
   override def close(): Unit = {
     threadPool.shutdown()
     for (channel <- channelPool.values().asScala) {
@@ -223,15 +338,5 @@ private object PDClient {
 
   def isNetworkErrStatus(status: Status): Boolean = {
     status.getCode == Code.UNAVAILABLE || status.getCode == Code.DEADLINE_EXCEEDED
-  }
-}
-
-object PDClientTest {
-  def main(args: Array[String]): Unit = {
-    org.apache.log4j.BasicConfigurator.configure()
-    LogManager.getRootLogger.setLevel(Level.INFO)
-
-    val client = new PDClient(Array("127.0.0.1:2379", "127.0.0.1:2382", "127.0.0.1:2384"))
-    client.close()
   }
 }
