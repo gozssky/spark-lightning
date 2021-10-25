@@ -1,9 +1,9 @@
-package com.pingcap.tikv
+package com.pingcap.lightning
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder
 import com.google.protobuf.ByteString
 import com.pingcap.kvproto.{Metapb, PDGrpc, Pdpb}
-import com.pingcap.tikv.PDClient._
+import com.pingcap.lightning.PDClient._
 import io.grpc.health.v1.{HealthCheckRequest, HealthCheckResponse, HealthGrpc}
 import io.grpc.{ManagedChannel, StatusRuntimeException}
 import io.grpc.netty.NettyChannelBuilder
@@ -11,7 +11,6 @@ import io.grpc.{Metadata, Status}
 import io.grpc.Status.Code
 import io.grpc.stub.MetadataUtils
 import org.slf4j.LoggerFactory
-
 import java.net.URL
 import java.util.concurrent.{ConcurrentHashMap, Executors, TimeUnit}
 import java.util.stream.Collectors
@@ -25,7 +24,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
   require(initPDAddrs.nonEmpty && !initPDAddrs.exists(_.isEmpty),
     "The length of initPDAddrs must be greater than 0 and each PDAddr must be non-empty.")
 
-  @volatile private var pdAddrs = initPDAddrs.map(PDClient.normalizeAddr)
+  @volatile private var pdAddrs = initPDAddrs.map(PDClient.convertToAddr)
 
   @volatile private var clusterID = 0L
   @volatile private var leaderAddr = ""
@@ -52,10 +51,14 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
 
   initCluster()
 
-  private val threadPool =
+  private val ticker =
     Executors.newSingleThreadScheduledExecutor(
-      new ThreadFactoryBuilder().setDaemon(true).build())
-  threadPool.scheduleWithFixedDelay(() => {
+      new ThreadFactoryBuilder()
+        .setNameFormat("pd-client-ticker-%d")
+        .setDaemon(true)
+        .build()
+    )
+  ticker.scheduleWithFixedDelay(() => {
     lastCheckLeaderElapsed += 1
     lastUpdateClusterElapsed += 1
     if (lastCheckLeaderElapsed >= CHECK_LEADER_TICKS || checkLeaderNow) {
@@ -112,7 +115,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
         }
         if (allIsWell) {
           var changed = false
-          val newLeaderAddr = PDClient.normalizeAddr(resp.getLeader.getClientUrls(0))
+          val newLeaderAddr = PDClient.convertToAddr(resp.getLeader.getClientUrls(0))
           if (newLeaderAddr != leaderAddr) {
             leaderAddr = newLeaderAddr
             forwardingMetadata = {
@@ -127,7 +130,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
             .flatMap(_.getClientUrlsList.stream())
             .collect(Collectors.toList[String])
             .asScala.toArray
-            .map(PDClient.normalizeAddr)
+            .map(PDClient.convertToAddr)
           if (!newFollowerAddrs.sameElements(followerAddrs)) {
             followerAddrs = newFollowerAddrs
             changed = true
@@ -193,7 +196,19 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
     null
   }
 
-  def getRegion(regionID: Long): Metapb.Region = {
+  def getTS: Long = {
+    0
+  }
+
+  private def handleRegionResponse(resp: Pdpb.GetRegionResponse): Region = {
+    new Region()
+      .setMeta(resp.getRegion)
+      .setLeader(resp.getLeader)
+      .setDownPeers(resp.getDownPeersList.asScala.map(_.getPeer).toArray)
+      .setPendingPeers(resp.getPendingPeersList.asScala.toArray)
+  }
+
+  def getRegion(regionID: Long): Region = {
     try {
       val resp = getStub.getRegionByID(
         Pdpb.GetRegionByIDRequest.newBuilder()
@@ -201,7 +216,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
           .setRegionId(regionID)
           .build()
       )
-      resp.getRegion
+      handleRegionResponse(resp)
     } catch {
       case e: StatusRuntimeException =>
         checkLeaderNow = true
@@ -209,7 +224,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
     }
   }
 
-  def getRegion(key: Array[Byte]): Metapb.Region = {
+  def getRegion(key: Array[Byte]): Region = {
     try {
       val resp = getStub.getRegion(
         Pdpb.GetRegionRequest.newBuilder()
@@ -217,7 +232,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
           .setRegionKey(ByteString.copyFrom(key))
           .build()
       )
-      resp.getRegion
+      handleRegionResponse(resp)
     } catch {
       case e: StatusRuntimeException =>
         checkLeaderNow = true
@@ -306,12 +321,14 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
   }
 
   override def close(): Unit = {
-    threadPool.shutdown()
-    try {
-      threadPool.awaitTermination(DEFAULT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS)
+    ticker.shutdown()
+    val terminated = try {
+      ticker.awaitTermination(DEFAULT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS)
     } catch {
-      case e: InterruptedException =>
-        throw new RuntimeException("shutdown thread pool timeout")
+      case _: InterruptedException => false
+    }
+    if (!terminated) {
+      log.warn("Can't wait until the termination of ticker timeout or current thread is interrupted")
     }
     for (channel <- channelPool.values().asScala) {
       channel.shutdown()
@@ -320,17 +337,17 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
   }
 }
 
-private object PDClient {
+object PDClient {
   val MAX_INIT_CLUSTER_RETRY = 60
   val NEXT_INIT_CLUSTER_DELAY_MS = 1000
   val DEFAULT_TIMEOUT_MS = 10000 // 10s
   val MS_PER_TICK = 100
   val CHECK_LEADER_TICKS: Int = 1000 / MS_PER_TICK // 1s
   val UPDATE_CLUSTER_TICKS: Int = 10000 / MS_PER_TICK // 10s
-  val FORWARDING_METADATA_KEY: Metadata.Key[String] =
+  private val FORWARDING_METADATA_KEY: Metadata.Key[String] =
     Metadata.Key.of("pd-forwarded-host", Metadata.ASCII_STRING_MARSHALLER)
 
-  def normalizeAddr(addrOrURL: String): String = {
+  private def convertToAddr(addrOrURL: String): String = {
     val url = if (addrOrURL.contains("://")) {
       new URL(addrOrURL)
     } else {
@@ -342,7 +359,7 @@ private object PDClient {
     s"${url.getHost}:${url.getPort}"
   }
 
-  def isNetworkErrStatus(status: Status): Boolean = {
+  private def isNetworkErrStatus(status: Status): Boolean = {
     status.getCode == Code.UNAVAILABLE || status.getCode == Code.DEADLINE_EXCEEDED
   }
 }

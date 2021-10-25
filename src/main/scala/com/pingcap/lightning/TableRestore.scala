@@ -153,9 +153,7 @@ class TableRestore(tiConf: TiConfiguration) extends Serializable {
       cdo.writeLong(handle)
       cdo.toBytes
     } else {
-      Array[Byte] {
-        '0'
-      }
+      Array[Byte]('0')
     }
     (encodedKey, encodedValue)
   }

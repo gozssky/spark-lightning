@@ -1,20 +1,14 @@
-package com.pingcap.tikv
+package com.pingcap.lightning
 
 import com.google.protobuf.ByteString
 import com.pingcap.kvproto.Metapb
+import io.grpc.ForwardingChannelBuilder
+import io.grpc.internal.ManagedChannelImplBuilder
 
 import java.util
 import scala.collection.mutable.ArrayBuffer
 
 class SplitClient(pdAddr: String) {
-  //  def this(pdAddr: String) = {
-  ////    this(pdAddr, new ChannelPool())
-  //  }
-
-  //  private val channel = channelPool.getChannel(pdAddr)
-  //  private val pdStub = PDGrpc.newStub(channelPool.getChannel(pdAddr))
-
-
   def splitRegionAndScatter(splitKeys: Seq[Array[Byte]]): Unit = {
     //    val regions = splitRegion(splitKeys.map(key => ByteString.copyFrom(key)).asJava)
     //    val pdClient = tiSession.getPDClient
