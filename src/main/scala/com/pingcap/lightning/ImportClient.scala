@@ -2,24 +2,31 @@ package com.pingcap.lightning
 
 import com.google.protobuf.ByteString
 import com.pingcap.kvproto.ImportSstpb.SSTMeta
-import com.pingcap.kvproto.{ImportSSTGrpc, ImportSstpb, Metapb}
+import com.pingcap.kvproto.Metapb.RegionEpoch
+import com.pingcap.kvproto.{ImportSSTGrpc, ImportSstpb, Kvrpcpb}
 import com.pingcap.lightning.ImportClient._
-import io.grpc.ManagedChannel
 import io.grpc.stub.StreamObserver
 
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
-import scala.collection.JavaConverters._
 
-class ImportClient(pdClient: PDClient, region: Region) {
-  private val peers = region.meta.getPeersList.asScala
-  private val storeAddrs = new Array[String](peers.size)
-  private val writeClients = new Array[WriteClient](peers.size)
+class ImportClient(
+  pdClient: PDClient,
+  regionID: Long,
+  regionEpoch: RegionEpoch,
+  leaderContext: Kvrpcpb.Context,
+  leaderAddr: String,
+  peerAddrs: Array[String],
+  channelPool: SharedChannelPool
+) {
   private var initialized = false
+  private val writeClients = new Array[WriteClient](peerAddrs.length)
+
   private val kvBatch = new java.util.ArrayList[ImportSstpb.Pair]()
   private var kvBatchSizeInBytes = 0
 
-  private class WriteClient(asyncStub: ImportSSTGrpc.ImportSSTStub) {
+  private class WriteClient(channel: SharedChannel) {
+    private val asyncStub = ImportSSTGrpc.newStub(channel)
     private var writeError: Throwable = _
     private var writeResp: ImportSstpb.WriteResponse = _
     private val finishLatch = new CountDownLatch(1)
@@ -49,9 +56,10 @@ class ImportClient(pdClient: PDClient, region: Region) {
       reqObserver.onNext(ImportSstpb.WriteRequest.newBuilder().setBatch(batch).build())
     }
 
-    def finishWrite(): java.util.List[SSTMeta] = {
+    def finish(): java.util.List[SSTMeta] = {
       reqObserver.onCompleted()
       finishLatch.await()
+      channel.close()
       if (writeError != null) {
         throw writeError
       }
@@ -60,19 +68,21 @@ class ImportClient(pdClient: PDClient, region: Region) {
       }
       writeResp.getMetasList
     }
+
+    def abort(): Unit = {
+      channel.close()
+    }
   }
 
   private def lazyInit(): Unit = {
     if (!initialized) {
-      for (i <- peers.indices) {
-        storeAddrs(i) = pdClient.getStore(peers(i).getStoreId).getAddress
-        val channel = ChannelPool.getChannel(storeAddrs(i))
-        writeClients(i) = new WriteClient(ImportSSTGrpc.newStub(channel))
+      for (i <- peerAddrs.indices) {
+        writeClients(i) = new WriteClient(channelPool.getChannel(peerAddrs(i)))
       }
       val meta = ImportSstpb.SSTMeta.newBuilder()
         .setUuid(ByteString.copyFrom(genUUID()))
-        .setRegionId(region.meta.getId)
-        .setRegionEpoch(region.meta.getRegionEpoch)
+        .setRegionId(regionID)
+        .setRegionEpoch(regionEpoch)
         .build()
       writeClients.foreach(client => {
         client.writeMeta(meta)
@@ -82,6 +92,7 @@ class ImportClient(pdClient: PDClient, region: Region) {
   }
 
   private def flush(): Unit = {
+    lazyInit()
     val writeBatch = ImportSstpb.WriteBatch.newBuilder()
       .addAllPairs(kvBatch)
       .setCommitTs(pdClient.getTS)
@@ -94,7 +105,6 @@ class ImportClient(pdClient: PDClient, region: Region) {
   }
 
   def write(key: Array[Byte], value: Array[Byte]): Unit = {
-    lazyInit()
     if (kvBatch.size() >= MAX_KV_BATCH_KEYS ||
       kvBatchSizeInBytes + key.length + value.length > MAX_KV_BATCH_SIZE_IN_BYTES) {
       flush()
@@ -107,30 +117,31 @@ class ImportClient(pdClient: PDClient, region: Region) {
   }
 
   def finish(): Unit = {
-    lazyInit()
     flush()
-    val sstMetas = writeClients.map(client => client.finishWrite()).apply(0)
-    var leaderAddr: String = null
-    for (i <- peers.indices) {
-      if (peers(i).getId == region.leader.getId) {
-        leaderAddr = storeAddrs(i)
+    val writeResults = writeClients.map(client => client.finish()).toList
+    for (i <- 1 until writeResults.length) {
+      assert(writeResults(i).equals(writeResults.head))
+    }
+    val sstMetas = writeResults.head
+    val req = ImportSstpb.MultiIngestRequest.newBuilder()
+      .setContext(leaderContext)
+      .addAllSsts(sstMetas)
+      .build()
+    val channel = channelPool.getChannel(leaderAddr)
+    val blockingStub = ImportSSTGrpc.newBlockingStub(channel)
+    try {
+      val resp = blockingStub.multiIngest(req)
+      if (resp.hasError) {
+        // TODO: handle error and retry.
+        throw new RuntimeException(resp.getError.getMessage)
       }
+    } finally {
+      channel.close()
     }
-    val leaderChannel = ChannelPool.getChannel(leaderAddr)
-    for (addr <- storeAddrs) {
-      ChannelPool.releaseChannel(addr)
-    }
+  }
 
-//    val ingestReq = ImportSstpb.MultiIngestRequest.newBuilder()
-//      .setContext(region.getLeaderContext)
-//      .addAllSsts(metas)
-//      .build()
-//    val blockingStub = ImportSSTGrpc.newBlockingStub(leaderChannel)
-//    val resp = blockingStub.multiIngest(ingestReq)
-//    if (resp.hasError) {
-//      // TODO: handle error and retry.
-//      throw new RegionException(resp.getError)
-//    }
+  def abort(): Unit = {
+    writeClients.foreach(client => client.abort())
   }
 }
 

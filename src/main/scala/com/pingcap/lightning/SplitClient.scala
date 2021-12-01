@@ -8,7 +8,7 @@ import io.grpc.internal.ManagedChannelImplBuilder
 import java.util
 import scala.collection.mutable.ArrayBuffer
 
-class SplitClient(pdAddr: String) {
+class SplitClient(pdClient: PDClient) {
   def splitRegionAndScatter(splitKeys: Seq[Array[Byte]]): Unit = {
     //    val regions = splitRegion(splitKeys.map(key => ByteString.copyFrom(key)).asJava)
     //    val pdClient = tiSession.getPDClient

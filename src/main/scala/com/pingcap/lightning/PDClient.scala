@@ -18,7 +18,7 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 
-class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) extends AutoCloseable {
+class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) {
   private val log = LoggerFactory.getLogger(getClass.getName.stripSuffix("$"))
 
   require(initPDAddrs.nonEmpty && !initPDAddrs.exists(_.isEmpty),
@@ -200,15 +200,15 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
     0
   }
 
-  private def handleRegionResponse(resp: Pdpb.GetRegionResponse): Region = {
-    new Region()
+  private def handleRegionResponse(resp: Pdpb.GetRegionResponse): TiRegion = {
+    new TiRegion()
       .setMeta(resp.getRegion)
       .setLeader(resp.getLeader)
       .setDownPeers(resp.getDownPeersList.asScala.map(_.getPeer).toArray)
       .setPendingPeers(resp.getPendingPeersList.asScala.toArray)
   }
 
-  def getRegion(regionID: Long): Region = {
+  def getRegion(regionID: Long): TiRegion = {
     try {
       val resp = getStub.getRegionByID(
         Pdpb.GetRegionByIDRequest.newBuilder()
@@ -224,7 +224,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
     }
   }
 
-  def getRegion(key: Array[Byte]): Region = {
+  def getRegion(key: Array[Byte]): TiRegion = {
     try {
       val resp = getStub.getRegion(
         Pdpb.GetRegionRequest.newBuilder()
@@ -320,7 +320,7 @@ class PDClient(initPDAddrs: Array[String], enableForwarding: Boolean = true) ext
     }
   }
 
-  override def close(): Unit = {
+  def close(): Unit = {
     ticker.shutdown()
     val terminated = try {
       ticker.awaitTermination(DEFAULT_TIMEOUT_MS * 2, TimeUnit.MILLISECONDS)
